@@ -46,13 +46,13 @@ struct DetData{ // proposed struct filled out by Determination
   float AR;
   float pressure;
   float Time; 
+  uint8_t Usage; // 00 means using timer (error on all others), 01 means using 1 GPS, 02 using 2 GPS, 03 all 3 GPS, 04 using pressure, 05 using linear progression
 } detData;
 
 uint8_t ascentCounter = 0, SAcounter = 0, floatCounter = 0, descentCounter = 0;
 uint8_t tempCounter = 0, battCounter = 0, boundCounter = 0, timerCounter = 0;
-unsigned long ascentStamp = 0, SAstamp = 0, floatStamp = 0, defaultStamp = 0, defaultStampCutA = 0;
+unsigned long ascentStamp = 0, SAstamp = 0, floatStamp = 0, defaultStamp = 0, defaultStamp2, defaultStampCutA = 0;
 
-uint8_t detHex; // 00 means using GPS, 01 using pressure, 02 using linear progression
 uint8_t stateSuggest; // state recommended by control
 uint8_t currentState = INITIALIZATION; // state we are in, starts as initialization
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -66,42 +66,38 @@ void Determination(){
   // if below floor with bad GPS, throws error
   // uses hex indication as to whether it is using GPS, pressure, or linear progression
 
-  if (compareGPS()){ // have compareGPS return a bool - true if GPS data is good, false if not (all 3 GPS fail)
+  if (compareGPS()){ // have compareGPS return a bool - true if GPS data is good, false if not (all 3 GPS fail) SET DETDATA.USAGE TO 1, 2, or 3 in COMPAREGPS FUNCTION
     
     detData.alt = GPSdata.alt;
     detData.latitude = GPSdata.latitude;
     detData.longitude = GPSdata.longitude;
     detData.AR = GPSdata.AR;
-
-    detHex = 0x00; // using GPS for determination
     
   }
   
-  if (pressureValid()){ // need a way to determine if the pressure is valid
-    
+  else if (pressureValid()){ // need a way to determine if the pressure is valid
+
+    Serial.println(F("GPS NOT WORKING");
     detData.pressure = pressure;
-    
-    if (!compareGPS()){
-
-      detData.alt = GetAltFromPressure();
-      detData.latitude = 0; // or other alternative - 0 may be unreliable
-      detData.longitude = 0;
-      detData.AR = GetARFromPressure();
-
-      detHex = 0x01; // using pressure for determination
+    detData.alt = GetAltFromPressure();
+    detData.latitude = 0; // or other alternative - 0 may be unreliable
+    detData.longitude = 0;
+    detData.AR = GetARFromPressure();
+    detData.Usage = 0x04; // using pressure for determination
       
-    } 
   }
 
-  if (!compareGPS() && !pressureValid() && tenGoodHits() && (LastKnownAltitude >= ALTITUDE_FLOOR)){
+  else if (tenGoodHits && (LastKnownAltitude >= ALTITUDE_FLOOR)){
 
+    Serial.println(F("GPS NOT WORKING");
     linearProgression();
-    detHex = 0x02; // using linear progression
+    detData.Usage = 0x05; // using linear progression
     
   }
 
-  if (!compareGPS() && (LastKnownAltitude < ALTITUDE_FLOOR){
+  else{
     Serial.println(F("GPS NOT WORKING"); // outputs a warning if GPS not working while on the ground
+    detData.Usage = 0x00; // indicates error
     // have LED indication
   }
   
@@ -143,6 +139,10 @@ void Control(){
 
   if (millis() > MASTER_TIMER){
     stateSuggest = PAST_TIMER;
+  }
+
+  if (detData.Usage == 0x00){ // error state
+    stateSuggest = ERROR_STATE; // doesn't exist - State will go to default
   }
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -315,7 +315,7 @@ void State(){
 
     ////MASTER TIMER REACHED////
     case PAST_TIMER:
-    
+
       if (currentState!=PAST_TIMER){ // criteria for entering Master Timer Reached functionality
         timerCounter += 1; // increment ascent counter
         ascentCounter = 0, SAcounter = 0, floatCounter = 0, SDcounter = 0, descentCounter = 0; 
@@ -329,16 +329,25 @@ void State(){
       if (currentState==PAST_TIMER){ // operations after Master Timer reached
         
         cutResistorOnA();
-        cutResistorOnB();
+        timerStampCutA = millis();
+         if (millis() - timerStampCutA >= SLOW_DESCENT_TIMER){ // wait to cut B (hopefully to get slow descent data)
+          cutResistorOnB();
+         }
       }
+
+      break;
 
     ////DEFAULT////
     default: 
 
-      if (currentState==INITIALIZATION){ // currentState is initialized as INITIALIZATION
+    // move outside of switch-case
+    // has to get through initialization to trigger states
+    // if initialization never triggers, moves to the next of the function where it cuts A then B
+
+      if (currentState==INITIALIZATION){ // currentState is initialized as INITIALIZATION, no other states have been activated
 
         defaultStamp = millis();
-        if ( (millis()-defaultStamp) >= (INITIALIZION_TIME + ASCENT_TIMER) ){ // gives an extra time buffer to leave initialization
+        if ( (millis()-defaultStamp) >= (INITIALIZATION_TIME + ASCENT_TIMER) ){ // gives an extra time buffer to leave initialization
 
          cutResistorOnA();
          defaultStampCutA = millis();
@@ -347,6 +356,20 @@ void State(){
          }
         }
           
+        }
+
+        else {
+          // if it's not in initialization, means it entered another state at some point, then everything stopped working and stateSuggest = ERROR_STATE now
+          // should wait a while to see if it will enter a state again, then do the same cut strategy, hoping for some slow descent
+          defaultStamp2 = millis();
+          if ( (millis()-defaultStamp2) >= (DEFAULT_TIME + ASCENT_TIMER) ){ // gives an extra time buffer to leave default
+
+            cutResistorOnA();
+            defaultStampCutA = millis();
+            if (millis() - defaultStampCutA >= SLOW_DESCENT_TIMER){ // wait to cut B (hopefully to get slow descent data)
+              cutResistorOnB();
+            }
+          }
         }
         
   }
